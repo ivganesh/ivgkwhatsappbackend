@@ -11,6 +11,8 @@ import { CompaniesModule } from './companies/companies.module';
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { ContactsModule } from './contacts/contacts.module';
 import { MessagesModule } from './messages/messages.module';
+import { CampaignsModule } from './campaigns/campaigns.module';
+import { TemplatesModule } from './templates/templates.module';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import jwtConfig from './config/jwt.config';
@@ -30,8 +32,13 @@ import whatsappConfig from './config/whatsapp.config';
       useFactory: (configService: ConfigService) => ({
         throttlers: [
           {
-            ttl: parseInt(configService.get<string>('THROTTLE_TTL') || '60', 10) * 1000,
-            limit: parseInt(configService.get<string>('THROTTLE_LIMIT') || '100', 10),
+            ttl:
+              parseInt(configService.get<string>('THROTTLE_TTL') || '60', 10) *
+              1000,
+            limit: parseInt(
+              configService.get<string>('THROTTLE_LIMIT') || '100',
+              10,
+            ),
           },
         ],
       }),
@@ -45,6 +52,8 @@ import whatsappConfig from './config/whatsapp.config';
     WhatsAppModule,
     ContactsModule,
     MessagesModule,
+    CampaignsModule,
+    TemplatesModule,
   ],
   controllers: [AppController],
   providers: [

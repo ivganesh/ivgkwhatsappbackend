@@ -162,6 +162,136 @@ export class WhatsAppService {
     }
   }
 
+  async connectWhatsApp(companyId: string, code: string) {
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+    });
+
+    if (!company) {
+      throw new BadRequestException('Company not found');
+    }
+
+    // Exchange code for access token
+    const appId = this.configService.get<string>('whatsapp.appId');
+    const appSecret = this.configService.get<string>('whatsapp.appSecret');
+
+    if (!appId || !appSecret) {
+      throw new BadRequestException('WhatsApp app credentials not configured');
+    }
+
+    try {
+      // Step 1: Exchange code for access token
+      const tokenResponse = await axios.post(
+        `${this.apiUrl}/oauth/access_token`,
+        {
+          client_id: appId,
+          client_secret: appSecret,
+          code: code,
+        },
+      );
+
+      const accessToken = tokenResponse.data.access_token;
+
+      // Step 2: Get WABA and phone number info
+      const wabaResponse = await axios.get(`${this.apiUrl}/me`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        params: {
+          fields: 'whatsapp_business_account',
+        },
+      });
+
+      const wabaId = wabaResponse.data.whatsapp_business_account?.id;
+
+      if (!wabaId) {
+        throw new BadRequestException('Failed to get WhatsApp Business Account ID');
+      }
+
+      // Step 3: Get phone numbers
+      const phoneNumbersResponse = await axios.get(
+        `${this.apiUrl}/${wabaId}/phone_numbers`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        },
+      );
+
+      const phoneNumbers = phoneNumbersResponse.data.data;
+      if (!phoneNumbers || phoneNumbers.length === 0) {
+        throw new BadRequestException('No phone numbers found for this WABA');
+      }
+
+      const primaryPhone = phoneNumbers[0];
+
+      // Step 4: Store credentials in company
+      await this.prisma.company.update({
+        where: { id: companyId },
+        data: {
+          whatsappBusinessId: wabaId,
+          whatsappPhoneId: primaryPhone.id,
+          whatsappAccessToken: accessToken,
+          whatsappConnected: true,
+        },
+      });
+
+      // Step 5: Store phone number details
+      await this.prisma.phoneNumber.upsert({
+        where: {
+          companyId_phoneNumberId: {
+            companyId,
+            phoneNumberId: primaryPhone.id,
+          },
+        },
+        create: {
+          companyId,
+          phoneNumberId: primaryPhone.id,
+          phoneNumber: primaryPhone.display_phone_number || primaryPhone.verified_name || '',
+          displayName: primaryPhone.verified_name || '',
+          qualityRating: primaryPhone.quality_rating || null,
+          messagingTier: primaryPhone.messaging_product_tier || null,
+          isDefault: true,
+          isActive: true,
+        },
+        update: {
+          phoneNumber: primaryPhone.display_phone_number || primaryPhone.verified_name || '',
+          displayName: primaryPhone.verified_name || '',
+          qualityRating: primaryPhone.quality_rating || null,
+          messagingTier: primaryPhone.messaging_product_tier || null,
+          isDefault: true,
+        },
+      });
+
+      // Step 6: Subscribe to webhooks
+      try {
+        await axios.post(
+          `${this.apiUrl}/${wabaId}/subscribed_apps`,
+          {},
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          },
+        );
+      } catch (error) {
+        // Webhook subscription might fail, but we can continue
+        console.warn('Failed to subscribe to webhooks:', error);
+      }
+
+      return {
+        success: true,
+        wabaId,
+        phoneNumberId: primaryPhone.id,
+        phoneNumber: primaryPhone.display_phone_number || primaryPhone.verified_name,
+      };
+    } catch (error: any) {
+      throw new BadRequestException(
+        error.response?.data?.error?.message || 'Failed to connect WhatsApp',
+      );
+    }
+  }
+
   async verifyWebhookSignature(payload: any, signature: string): Promise<boolean> {
     const appSecret = this.configService.get<string>('whatsapp.webhookAppSecret');
     if (!appSecret) {
@@ -177,22 +307,38 @@ export class WhatsAppService {
     return signature === `sha256=${expectedSignature}`;
   }
 
-  async handleWebhook(companyId: string, webhookData: any) {
+  async handleWebhook(webhookData: any) {
     // Process incoming webhook from Meta
     // This will handle incoming messages, status updates, etc.
-    // Implementation depends on webhook structure from Meta
 
     if (webhookData.entry) {
       for (const entry of webhookData.entry) {
         if (entry.changes) {
           for (const change of entry.changes) {
-            if (change.value?.messages) {
-              // Handle incoming messages
-              await this.processIncomingMessages(companyId, change.value.messages);
-            }
-            if (change.value?.statuses) {
-              // Handle message status updates
-              await this.processStatusUpdates(companyId, change.value.statuses);
+            const value = change.value;
+            
+            // Find company by WABA ID
+            if (value?.metadata?.phone_number_id) {
+              const company = await this.prisma.company.findFirst({
+                where: {
+                  whatsappPhoneId: value.metadata.phone_number_id,
+                },
+              });
+
+              if (!company) {
+                console.warn('Company not found for phone number:', value.metadata.phone_number_id);
+                continue;
+              }
+
+              if (value.messages) {
+                // Handle incoming messages
+                await this.processIncomingMessages(company.id, value.messages);
+              }
+              
+              if (value.statuses) {
+                // Handle message status updates
+                await this.processStatusUpdates(company.id, value.statuses);
+              }
             }
           }
         }

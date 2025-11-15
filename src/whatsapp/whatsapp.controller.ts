@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { WhatsAppService } from './whatsapp.service';
+import { ConnectWhatsAppDto } from './dto/connect-whatsapp.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ConfigService } from '@nestjs/config';
@@ -50,11 +51,21 @@ export class WhatsAppController {
     }
 
     // Process webhook
-    // Extract company ID from webhook data (you may need to map WABA ID to company)
-    // For now, this is a placeholder
-    // await this.whatsappService.handleWebhook(companyId, body);
+    await this.whatsappService.handleWebhook(body);
 
     return { status: 'ok' };
+  }
+
+  @Post('connect')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({ summary: 'Connect WhatsApp via Meta Embedded Signup' })
+  async connectWhatsApp(
+    @CurrentUser() user: any,
+    @Body('companyId') companyId: string,
+    @Body('code') code: string,
+  ) {
+    return this.whatsappService.connectWhatsApp(companyId, code);
   }
 
   @Post('send/text')
