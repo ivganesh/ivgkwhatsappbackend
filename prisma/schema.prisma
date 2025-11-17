@@ -20,6 +20,8 @@ model User {
   name              String
   password          String
   emailVerifiedAt   DateTime?          @map("email_verified_at")
+  emailVerificationToken String?       @map("email_verification_token")
+  emailVerificationTokenExpiresAt DateTime? @map("email_verification_token_expires_at")
   avatar            String?
   locale            String             @default("en")
   timezone          String             @default("UTC")

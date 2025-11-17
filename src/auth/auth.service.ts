@@ -39,6 +39,10 @@ export class AuthService {
 
     // Generate email verification token
     const emailVerificationToken = randomBytes(32).toString('hex');
+    const emailVerificationTokenExpiresAt = new Date();
+    emailVerificationTokenExpiresAt.setHours(
+      emailVerificationTokenExpiresAt.getHours() + 24,
+    ); // 24 hours expiry
 
     // Create user
     const user = await this.prisma.user.create({
@@ -49,6 +53,8 @@ export class AuthService {
         timezone: timezone || 'UTC',
         locale: locale || 'en',
         emailVerifiedAt: null,
+        emailVerificationToken,
+        emailVerificationTokenExpiresAt,
       },
     });
 
@@ -107,6 +113,7 @@ export class AuthService {
         email: user.email,
         name: user.name,
         emailVerified: !!user.emailVerifiedAt,
+        isSuperAdmin: user.isSuperAdmin,
         companies: user.companies.map((cu) => ({
           id: cu.company.id,
           name: cu.company.name,
@@ -119,9 +126,41 @@ export class AuthService {
   }
 
   async verifyEmail(token: string) {
-    // In a real implementation, you would store the token in the database
-    // and verify it here. For now, this is a placeholder.
-    throw new BadRequestException('Email verification not fully implemented');
+    if (!token) {
+      throw new BadRequestException('Verification token is required');
+    }
+
+    // Find user by verification token
+    const user = await this.prisma.user.findFirst({
+      where: {
+        emailVerificationToken: token,
+        emailVerificationTokenExpiresAt: {
+          gt: new Date(), // Token must not be expired
+        },
+        emailVerifiedAt: null, // Email must not already be verified
+      },
+    });
+
+    if (!user) {
+      throw new BadRequestException(
+        'Invalid or expired verification token',
+      );
+    }
+
+    // Update user to mark email as verified and clear token
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerifiedAt: new Date(),
+        emailVerificationToken: null,
+        emailVerificationTokenExpiresAt: null,
+      },
+    });
+
+    return {
+      message: 'Email verified successfully',
+      email: user.email,
+    };
   }
 
   async requestPasswordReset(email: string) {

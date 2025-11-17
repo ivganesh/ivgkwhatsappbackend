@@ -19,8 +19,8 @@ export class EmailService {
   }
 
   async sendVerificationEmail(email: string, token: string) {
-    const appUrl = this.configService.get<string>('app.url');
-    const verificationUrl = `${appUrl}/verify-email?token=${token}`;
+    const frontendUrl = this.configService.get<string>('app.frontendUrl');
+    const verificationUrl = `${frontendUrl}/auth/verify-email?token=${token}`;
 
     const mailOptions = {
       from: this.configService.get<string>('MAIL_FROM'),

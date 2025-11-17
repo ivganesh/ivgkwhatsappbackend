@@ -6,6 +6,8 @@ import {
   HttpStatus,
   UseGuards,
   Get,
+  Query,
+  BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
@@ -41,8 +43,22 @@ export class AuthController {
     return this.authService.login(loginDto);
   }
 
+  @Get('verify-email')
+  @ApiOperation({ summary: 'Verify email address' })
+  @ApiResponse({ status: 200, description: 'Email verified successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired token' })
+  async verifyEmailGet(@Query('token') token: string) {
+    if (!token) {
+      throw new BadRequestException('Verification token is required');
+    }
+    return this.authService.verifyEmail(token);
+  }
+
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify email address (POST)' })
+  @ApiResponse({ status: 200, description: 'Email verified successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired token' })
   async verifyEmail(@Body() verifyEmailDto: VerifyEmailDto) {
     return this.authService.verifyEmail(verifyEmailDto.token);
   }
@@ -77,6 +93,7 @@ export class AuthController {
       email: user.email,
       name: user.name,
       emailVerified: !!user.emailVerifiedAt,
+      isSuperAdmin: user.isSuperAdmin,
       companies: user.companies?.map((cu: any) => ({
         id: cu.company.id,
         name: cu.company.name,

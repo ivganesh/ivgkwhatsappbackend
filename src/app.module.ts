@@ -13,6 +13,7 @@ import { ContactsModule } from './contacts/contacts.module';
 import { MessagesModule } from './messages/messages.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
 import { TemplatesModule } from './templates/templates.module';
+import { AdminModule } from './admin/admin.module';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import jwtConfig from './config/jwt.config';
@@ -54,6 +55,7 @@ import whatsappConfig from './config/whatsapp.config';
     MessagesModule,
     CampaignsModule,
     TemplatesModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [
