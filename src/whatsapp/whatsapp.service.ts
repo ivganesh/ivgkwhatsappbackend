@@ -12,8 +12,11 @@ export class WhatsAppService {
     private configService: ConfigService,
     private prisma: PrismaService,
   ) {
-    this.apiUrl = this.configService.get<string>('whatsapp.apiUrl') || 'https://graph.facebook.com/v18.0';
-    this.apiVersion = this.configService.get<string>('whatsapp.apiVersion') || 'v18.0';
+    this.apiUrl =
+      this.configService.get<string>('whatsapp.apiUrl') ||
+      'https://graph.facebook.com/v23.0';
+    this.apiVersion =
+      this.configService.get<string>('whatsapp.apiVersion') || 'v23.0';
   }
 
   private getApiClient(accessToken: string): AxiosInstance {
@@ -35,7 +38,11 @@ export class WhatsAppService {
       where: { id: companyId },
     });
 
-    if (!company || !company.whatsappConnected || !company.whatsappAccessToken) {
+    if (
+      !company ||
+      !company.whatsappConnected ||
+      !company.whatsappAccessToken
+    ) {
       throw new BadRequestException('WhatsApp not connected for this company');
     }
 
@@ -76,7 +83,11 @@ export class WhatsAppService {
       where: { id: companyId },
     });
 
-    if (!company || !company.whatsappConnected || !company.whatsappAccessToken) {
+    if (
+      !company ||
+      !company.whatsappConnected ||
+      !company.whatsappAccessToken
+    ) {
       throw new BadRequestException('WhatsApp not connected for this company');
     }
 
@@ -105,12 +116,16 @@ export class WhatsAppService {
         payload.template.components = components;
       }
 
-      const response = await apiClient.post(`/${phoneNumberId}/messages`, payload);
+      const response = await apiClient.post(
+        `/${phoneNumberId}/messages`,
+        payload,
+      );
 
       return response.data;
     } catch (error: any) {
       throw new BadRequestException(
-        error.response?.data?.error?.message || 'Failed to send template message',
+        error.response?.data?.error?.message ||
+          'Failed to send template message',
       );
     }
   }
@@ -126,7 +141,11 @@ export class WhatsAppService {
       where: { id: companyId },
     });
 
-    if (!company || !company.whatsappConnected || !company.whatsappAccessToken) {
+    if (
+      !company ||
+      !company.whatsappConnected ||
+      !company.whatsappAccessToken
+    ) {
       throw new BadRequestException('WhatsApp not connected for this company');
     }
 
@@ -152,7 +171,10 @@ export class WhatsAppService {
         payload[mediaType].caption = caption;
       }
 
-      const response = await apiClient.post(`/${phoneNumberId}/messages`, payload);
+      const response = await apiClient.post(
+        `/${phoneNumberId}/messages`,
+        payload,
+      );
 
       return response.data;
     } catch (error: any) {
@@ -205,7 +227,9 @@ export class WhatsAppService {
       const wabaId = wabaResponse.data.whatsapp_business_account?.id;
 
       if (!wabaId) {
-        throw new BadRequestException('Failed to get WhatsApp Business Account ID');
+        throw new BadRequestException(
+          'Failed to get WhatsApp Business Account ID',
+        );
       }
 
       // Step 3: Get phone numbers
@@ -247,7 +271,10 @@ export class WhatsAppService {
         create: {
           companyId,
           phoneNumberId: primaryPhone.id,
-          phoneNumber: primaryPhone.display_phone_number || primaryPhone.verified_name || '',
+          phoneNumber:
+            primaryPhone.display_phone_number ||
+            primaryPhone.verified_name ||
+            '',
           displayName: primaryPhone.verified_name || '',
           qualityRating: primaryPhone.quality_rating || null,
           messagingTier: primaryPhone.messaging_product_tier || null,
@@ -255,7 +282,10 @@ export class WhatsAppService {
           isActive: true,
         },
         update: {
-          phoneNumber: primaryPhone.display_phone_number || primaryPhone.verified_name || '',
+          phoneNumber:
+            primaryPhone.display_phone_number ||
+            primaryPhone.verified_name ||
+            '',
           displayName: primaryPhone.verified_name || '',
           qualityRating: primaryPhone.quality_rating || null,
           messagingTier: primaryPhone.messaging_product_tier || null,
@@ -283,7 +313,8 @@ export class WhatsAppService {
         success: true,
         wabaId,
         phoneNumberId: primaryPhone.id,
-        phoneNumber: primaryPhone.display_phone_number || primaryPhone.verified_name,
+        phoneNumber:
+          primaryPhone.display_phone_number || primaryPhone.verified_name,
       };
     } catch (error: any) {
       throw new BadRequestException(
@@ -292,8 +323,13 @@ export class WhatsAppService {
     }
   }
 
-  async verifyWebhookSignature(payload: any, signature: string): Promise<boolean> {
-    const appSecret = this.configService.get<string>('whatsapp.webhookAppSecret');
+  async verifyWebhookSignature(
+    payload: any,
+    signature: string,
+  ): Promise<boolean> {
+    const appSecret = this.configService.get<string>(
+      'whatsapp.webhookAppSecret',
+    );
     if (!appSecret) {
       return false;
     }
@@ -316,7 +352,7 @@ export class WhatsAppService {
         if (entry.changes) {
           for (const change of entry.changes) {
             const value = change.value;
-            
+
             // Find company by WABA ID
             if (value?.metadata?.phone_number_id) {
               const company = await this.prisma.company.findFirst({
@@ -326,7 +362,10 @@ export class WhatsAppService {
               });
 
               if (!company) {
-                console.warn('Company not found for phone number:', value.metadata.phone_number_id);
+                console.warn(
+                  'Company not found for phone number:',
+                  value.metadata.phone_number_id,
+                );
                 continue;
               }
 
@@ -334,7 +373,7 @@ export class WhatsAppService {
                 // Handle incoming messages
                 await this.processIncomingMessages(company.id, value.messages);
               }
-              
+
               if (value.statuses) {
                 // Handle message status updates
                 await this.processStatusUpdates(company.id, value.statuses);
@@ -414,7 +453,9 @@ export class WhatsAppService {
 
       if (messageType === 'text') {
         content = message.text?.body || '';
-      } else if (['image', 'video', 'document', 'audio'].includes(messageType)) {
+      } else if (
+        ['image', 'video', 'document', 'audio'].includes(messageType)
+      ) {
         mediaUrl = message[messageType]?.id;
         mediaType = messageType.toUpperCase();
         content = message[messageType]?.caption || '';
@@ -455,7 +496,9 @@ export class WhatsAppService {
           status: this.mapWhatsAppStatus(messageStatus),
           ...(messageStatus === 'delivered' && { deliveredAt: new Date() }),
           ...(messageStatus === 'read' && { readAt: new Date() }),
-          ...(messageStatus === 'failed' && { error: status.errors?.[0]?.message }),
+          ...(messageStatus === 'failed' && {
+            error: status.errors?.[0]?.message,
+          }),
         },
       });
     }
@@ -471,4 +514,3 @@ export class WhatsAppService {
     return statusMap[status] || 'SENT';
   }
 }
-
