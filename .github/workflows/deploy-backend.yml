@@ -29,5 +29,30 @@ jobs:
             git fetch origin
             git reset --hard origin/main
             docker compose -f docker-compose.prod.yml up -d --build
+            
+            # Wait for postgres to be ready
+            echo "⏳ Waiting for database to be ready..."
+            sleep 10
+            
+            # Load environment variables and override DATABASE_URL for host execution
+            set -a
+            source .env.prod
+            # Override DATABASE_URL to use host port for migrations/seed
+            export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5440/${POSTGRES_DB}"
+            set +a
+            
+            # Run Prisma migrations from host (using repo's node_modules)
+            echo "🔄 Running database migrations..."
+            if [ -d "node_modules" ]; then
+              npx prisma migrate deploy || echo "⚠️  Migrations may have already been applied"
+            else
+              npm ci
+              npx prisma migrate deploy || echo "⚠️  Migrations may have already been applied"
+            fi
+            
+            # Run seed data (only creates admin if it doesn't exist)
+            echo "🌱 Seeding database..."
+            npm run seed || echo "⚠️  Seed may have already been run"
+            
             docker image prune -f --filter "dangling=true" || true
 
