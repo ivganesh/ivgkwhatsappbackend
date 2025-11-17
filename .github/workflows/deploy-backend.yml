@@ -34,12 +34,18 @@ jobs:
             echo "⏳ Waiting for database to be ready..."
             sleep 10
             
-            # Load environment variables and override DATABASE_URL for host execution
-            set -a
-            source .env.prod
+            # Load environment variables safely
+            while IFS= read -r line || [ -n "$line" ]; do
+              # Skip comments and empty lines
+              [[ "$line" =~ ^[[:space:]]*# ]] && continue
+              [[ -z "$line" ]] && continue
+              # Only export lines with = (KEY=VALUE format)
+              if [[ "$line" =~ = ]]; then
+                export "$line" 2>/dev/null || true
+              fi
+            done < .env.prod
             # Override DATABASE_URL to use host port for migrations/seed
             export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5440/${POSTGRES_DB}"
-            set +a
             
             # Run Prisma migrations from host (using repo's node_modules)
             echo "🔄 Running database migrations..."
