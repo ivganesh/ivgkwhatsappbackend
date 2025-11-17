@@ -15,6 +15,7 @@ services:
       - postgres
     networks:
       - whatsapp-net
+      - IVGK-proxy
 
   postgres:
     image: postgres:15
@@ -34,6 +35,8 @@ services:
 networks:
   whatsapp-net:
     driver: bridge
+  IVGK-proxy:
+    external: true
 
 volumes: {}
 
