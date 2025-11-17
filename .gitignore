@@ -40,4 +40,4 @@ lerna-debug.log*
 .env.*.local
 
 # Prisma
-/prisma/migrations
+# /prisma/migrations - Keep migrations in git for deployment
