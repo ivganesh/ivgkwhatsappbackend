@@ -1,0 +1,39 @@
+version: '3.9'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ivgk-whatsapp-backend
+    env_file:
+      - .env.prod
+    ports:
+      - "3015:3000"
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    networks:
+      - whatsapp-net
+
+  postgres:
+    image: postgres:15
+    container_name: ivgk-whatsapp-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5440:5432"
+    volumes:
+      - /opt/ivgk/whatsapp/postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - whatsapp-net
+
+networks:
+  whatsapp-net:
+    driver: bridge
+
+volumes: {}
+
