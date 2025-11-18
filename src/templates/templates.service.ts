@@ -319,8 +319,8 @@ export class TemplatesService {
     }
 
     const normalizedComponents = this.normalizeAndValidateComponents(
-        template.components as any,
-      );
+      template.components as any,
+    );
     const components = this.buildMetaComponents(normalizedComponents);
 
     try {
@@ -521,7 +521,32 @@ export class TemplatesService {
         'Body text cannot exceed 1024 characters',
       );
     }
+    const bodyPlaceholderIndexes = this.getPlaceholderIndexes(bodyText);
     this.validatePlaceholderSequence(bodyText);
+
+    if (bodyPlaceholderIndexes.length > 0) {
+      const exampleSource =
+        (body.example as any)?.body_text?.[0] ||
+        (Array.isArray((body.example as any)?.body_text)
+          ? (body.example as any)?.body_text
+          : []);
+      const normalizedSamples = Array.isArray(exampleSource)
+        ? exampleSource.map((value: any) => value?.toString().trim())
+        : [];
+      if (normalizedSamples.length < bodyPlaceholderIndexes.length) {
+        throw new BadRequestException(
+          'Provide sample values for every body placeholder ({{1}}, {{2}}, ...).',
+        );
+      }
+      if (normalizedSamples.some((sample) => !sample)) {
+        throw new BadRequestException(
+          'Body placeholder samples cannot be empty.',
+        );
+      }
+      body.example = { body_text: [normalizedSamples] };
+    } else if (body.example) {
+      delete (body.example as any).body_text;
+    }
 
     const header = components.find(
       (component) => component.type === 'HEADER',
@@ -543,6 +568,33 @@ export class TemplatesService {
         throw new BadRequestException(
           `Header text is not allowed when using ${headerFormat} format`,
         );
+      }
+
+      if (header.text) {
+        const headerPlaceholders = this.getPlaceholderIndexes(
+          header.text,
+        );
+        if (headerPlaceholders.length > 0) {
+          const headerExample =
+            (header.example as any)?.header_text ||
+            (header.example as any)?.header_examples;
+          const normalizedHeaderSamples = Array.isArray(headerExample)
+            ? headerExample.map((sample: any) => sample?.toString().trim())
+            : [];
+          if (
+            normalizedHeaderSamples.length < headerPlaceholders.length ||
+            normalizedHeaderSamples.some((sample) => !sample)
+          ) {
+            throw new BadRequestException(
+              'Provide sample text for each header placeholder.',
+            );
+          }
+          header.example = {
+            header_text: normalizedHeaderSamples,
+          };
+        } else if (header?.example) {
+          delete (header.example as any).header_text;
+        }
       }
     }
 
@@ -614,6 +666,19 @@ export class TemplatesService {
 
       return payload;
     });
+  }
+
+  private getPlaceholderIndexes(text: string): number[] {
+    const regex = /{{(\d+)}}/g;
+    const indexes = new Set<number>();
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(text)) !== null) {
+      const value = parseInt(match[1], 10);
+      if (!Number.isNaN(value) && value > 0) {
+        indexes.add(value);
+      }
+    }
+    return Array.from(indexes).sort((a, b) => a - b);
   }
 
   private extractRejectionReason(remoteTemplate: any): string | null {
