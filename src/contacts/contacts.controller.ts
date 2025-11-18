@@ -12,6 +12,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { ContactsService } from './contacts.service';
 import { CreateContactDto } from './dto/create-contact.dto';
+import { ImportContactsDto } from './dto/import-contacts.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 
@@ -29,6 +30,16 @@ export class ContactsController {
     @Body() createContactDto: CreateContactDto,
   ) {
     return this.contactsService.create(companyId, createContactDto);
+  }
+
+  @Post('import')
+  @ApiOperation({ summary: 'Bulk import contacts for a company' })
+  importContacts(
+    @CurrentUser() user: any,
+    @Body('companyId') companyId: string,
+    @Body() importContactsDto: ImportContactsDto,
+  ) {
+    return this.contactsService.importContacts(companyId, importContactsDto.contacts);
   }
 
   @Get()

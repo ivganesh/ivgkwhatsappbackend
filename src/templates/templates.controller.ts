@@ -79,6 +79,15 @@ export class TemplatesController {
     return this.templatesService.delete(companyId, user.id, id);
   }
 
+  @Post('sync')
+  @ApiOperation({ summary: 'Sync templates from Meta Business Account' })
+  syncFromMeta(
+    @CurrentUser() user: any,
+    @Body('companyId') companyId: string,
+  ) {
+    return this.templatesService.syncFromMeta(companyId, user.id);
+  }
+
   @Post(':id/submit')
   @ApiOperation({ summary: 'Submit template to Meta for approval' })
   submitToMeta(

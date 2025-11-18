@@ -112,5 +112,77 @@ export class ContactsService {
 
     return { message: 'Contact deleted' };
   }
+
+  async importContacts(companyId: string, contacts: CreateContactDto[]) {
+    if (!contacts || contacts.length === 0) {
+      return {
+        success: false,
+        message: 'No contacts provided for import',
+        summary: {
+          processed: 0,
+          created: 0,
+          updated: 0,
+          skipped: 0,
+        },
+      };
+    }
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    for (const contact of contacts) {
+      if (!contact.phone) {
+        skipped += 1;
+        continue;
+      }
+
+      const tags = contact.tags?.filter(Boolean) || [];
+
+      try {
+        const result = await this.prisma.contact.upsert({
+          where: {
+            companyId_phone: {
+              companyId,
+              phone: contact.phone,
+            },
+          },
+          update: {
+            name: contact.name || undefined,
+            email: contact.email || undefined,
+            countryCode: contact.countryCode || undefined,
+            tags,
+          },
+          create: {
+            companyId,
+            phone: contact.phone,
+            name: contact.name,
+            email: contact.email,
+            countryCode: contact.countryCode,
+            tags,
+          },
+        });
+
+        if (result.createdAt.getTime() === result.updatedAt.getTime()) {
+          created += 1;
+        } else {
+          updated += 1;
+        }
+      } catch (error) {
+        skipped += 1;
+      }
+    }
+
+    return {
+      success: true,
+      message: 'Contacts imported successfully',
+      summary: {
+        processed: contacts.length,
+        created,
+        updated,
+        skipped,
+      },
+    };
+  }
 }
 
