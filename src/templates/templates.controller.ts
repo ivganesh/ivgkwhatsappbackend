@@ -26,7 +26,7 @@ export class TemplatesController {
   @ApiOperation({ summary: 'Create a new message template' })
   create(
     @CurrentUser() user: any,
-    @Body('companyId') companyId: string,
+    @Query('companyId') companyId: string,
     @Body() createTemplateDto: CreateTemplateDto,
   ) {
     return this.templatesService.create(companyId, user.id, createTemplateDto);
