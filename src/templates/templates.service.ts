@@ -344,10 +344,26 @@ export class TemplatesService {
       template.whatsappTemplateId = null;
     }
 
+    // Validate template has components
+    if (
+      !template.components ||
+      !Array.isArray(template.components) ||
+      template.components.length === 0
+    ) {
+      throw new BadRequestException(
+        'Template must have at least one component',
+      );
+    }
+
     const normalizedComponents = this.normalizeAndValidateComponents(
       template.components as any,
     );
     const components = this.buildMetaComponents(normalizedComponents);
+
+    // Validate components array is not empty after building
+    if (!components || components.length === 0) {
+      throw new BadRequestException('Template components are invalid or empty');
+    }
 
     try {
       const apiClient = this.getApiClient(company.whatsappAccessToken);
@@ -364,6 +380,8 @@ export class TemplatesService {
         'Submitting template to Meta:',
         JSON.stringify(payload, null, 2),
       );
+      console.log('Template ID:', id);
+      console.log('Company ID:', companyId);
 
       const response = await apiClient.post(
         `/${company.whatsappBusinessId}/message_templates`,
@@ -573,7 +591,7 @@ export class TemplatesService {
     if (bodyPlaceholderIndexes.length > 0) {
       // Extract body example - Meta stores it as nested array: [[values]]
       let exampleSource: any[] = [];
-      const bodyExample = (body.example as any)?.body_text;
+      const bodyExample = body.example?.body_text;
 
       if (bodyExample) {
         if (Array.isArray(bodyExample)) {
@@ -605,7 +623,7 @@ export class TemplatesService {
       body.example = { body_text: [normalizedSamples] };
     } else if (body.example) {
       // Remove body_text if no placeholders
-      delete (body.example as any).body_text;
+      delete body.example.body_text;
     }
 
     const header = components.find((component) => component.type === 'HEADER');
@@ -632,8 +650,7 @@ export class TemplatesService {
         const headerPlaceholders = this.getPlaceholderIndexes(header.text);
         if (headerPlaceholders.length > 0) {
           const headerExample =
-            (header.example as any)?.header_text ||
-            (header.example as any)?.header_examples;
+            header.example?.header_text || header.example?.header_examples;
           const normalizedHeaderSamples = Array.isArray(headerExample)
             ? headerExample.map((sample: any) => sample?.toString().trim())
             : [];
@@ -649,7 +666,7 @@ export class TemplatesService {
             header_text: normalizedHeaderSamples,
           };
         } else if (header?.example) {
-          delete (header.example as any).header_text;
+          delete header.example.header_text;
         }
       }
     }
@@ -695,71 +712,103 @@ export class TemplatesService {
   }
 
   private buildMetaComponents(components: TemplateComponentDto[]): any[] {
-    return components.map((component) => {
-      const payload: any = {
-        type: component.type,
-      };
+    return components
+      .map((component) => {
+        const payload: any = {
+          type: component.type,
+        };
 
-      if (component.format) {
-        payload.format = component.format;
-      }
-      if (component.text) {
-        payload.text = component.text;
-      }
+        if (component.format) {
+          payload.format = component.format;
+        }
+        if (component.text) {
+          payload.text = component.text;
+        }
 
-      // Only include example if it exists and has valid data
-      if (component.example) {
-        const example: any = {};
-        let hasExample = false;
+        // Only include example if it exists and has valid data
+        if (component.example) {
+          const example: any = {};
+          let hasExample = false;
 
-        // Handle body example
-        if ((component.example as any).body_text) {
-          const bodyText = (component.example as any).body_text;
-          // Meta expects body_text to be an array of arrays
-          if (Array.isArray(bodyText) && bodyText.length > 0) {
-            // If it's already nested, use it; otherwise wrap it
-            const normalized = Array.isArray(bodyText[0])
-              ? bodyText
-              : [bodyText];
-            example.body_text = normalized;
-            hasExample = true;
+          // Handle body example
+          if (component.example.body_text) {
+            const bodyText = component.example.body_text;
+            // Meta expects body_text to be an array of arrays
+            if (Array.isArray(bodyText) && bodyText.length > 0) {
+              // If it's already nested, use it; otherwise wrap it
+              const normalized = Array.isArray(bodyText[0])
+                ? bodyText
+                : [bodyText];
+              // Filter out empty values
+              const filtered = normalized.map((arr: any[]) =>
+                Array.isArray(arr)
+                  ? arr.filter((v) => v != null && v !== '')
+                  : arr,
+              );
+              if (
+                filtered.length > 0 &&
+                filtered[0] &&
+                filtered[0].length > 0
+              ) {
+                example.body_text = filtered;
+                hasExample = true;
+              }
+            }
+          }
+
+          // Handle header example
+          if (component.example.header_text) {
+            const headerText = component.example.header_text;
+            // Meta expects header_text to be an array (not nested)
+            if (Array.isArray(headerText) && headerText.length > 0) {
+              // Filter out empty values
+              const filtered = headerText.filter((v) => v != null && v !== '');
+              if (filtered.length > 0) {
+                example.header_text = filtered;
+                hasExample = true;
+              }
+            }
+          }
+
+          // Handle header_handle (for media headers)
+          if (component.example.header_handle) {
+            const handle = component.example.header_handle;
+            if (handle && handle !== '') {
+              example.header_handle = handle;
+              hasExample = true;
+            }
+          }
+
+          if (hasExample) {
+            payload.example = example;
           }
         }
 
-        // Handle header example
-        if ((component.example as any).header_text) {
-          const headerText = (component.example as any).header_text;
-          // Meta expects header_text to be an array (not nested)
-          if (Array.isArray(headerText) && headerText.length > 0) {
-            example.header_text = headerText;
-            hasExample = true;
-          }
+        if (
+          component.buttons &&
+          Array.isArray(component.buttons) &&
+          component.buttons.length > 0
+        ) {
+          payload.buttons = component.buttons;
+        }
+        if (component.variables) {
+          payload.variables = component.variables;
         }
 
-        // Handle header_handle (for media headers)
-        if ((component.example as any).header_handle) {
-          example.header_handle = (component.example as any).header_handle;
-          hasExample = true;
-        }
-
-        if (hasExample) {
-          payload.example = example;
-        }
-      }
-
-      if (
-        component.buttons &&
-        Array.isArray(component.buttons) &&
-        component.buttons.length > 0
-      ) {
-        payload.buttons = component.buttons;
-      }
-      if (component.variables) {
-        payload.variables = component.variables;
-      }
-
-      return payload;
-    });
+        return payload;
+      })
+      .filter((payload) => {
+        // Remove components that don't have required fields
+        if (!payload.type) return false;
+        if (payload.type === 'BODY' && !payload.text) return false;
+        if (
+          payload.type === 'HEADER' &&
+          payload.format === 'TEXT' &&
+          !payload.text
+        )
+          return false;
+        return true;
+      });
   }
 
   private getPlaceholderIndexes(text: string): number[] {
