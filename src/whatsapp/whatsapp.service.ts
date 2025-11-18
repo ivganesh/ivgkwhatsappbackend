@@ -29,6 +29,74 @@ export class WhatsAppService {
     });
   }
 
+  private normalizePhoneNumber(phoneNumber: string): string {
+    // Remove all non-digit characters except +
+    let normalized = phoneNumber.replace(/[^\d+]/g, '');
+    
+    // If doesn't start with +, add it (assuming it's a valid number)
+    if (!normalized.startsWith('+')) {
+      // If starts with 0, remove it and add country code (default to +1 for US)
+      if (normalized.startsWith('0')) {
+        normalized = '+1' + normalized.substring(1);
+      } else {
+        normalized = '+' + normalized;
+      }
+    }
+    
+    return normalized;
+  }
+
+  /**
+   * Check if contact has an active conversation window (within 24 hours)
+   * WhatsApp allows free-form messages only within 24 hours of last user message
+   */
+  private async hasActiveConversationWindow(
+    companyId: string,
+    contactId: string,
+  ): Promise<boolean> {
+    const conversation = await this.prisma.conversation.findUnique({
+      where: {
+        companyId_contactId: {
+          companyId,
+          contactId,
+        },
+      },
+    });
+
+    if (!conversation || !conversation.lastMessageAt) {
+      return false;
+    }
+
+    // Check if last message was within 24 hours
+    const lastMessageTime = new Date(conversation.lastMessageAt);
+    const now = new Date();
+    const hoursSinceLastMessage =
+      (now.getTime() - lastMessageTime.getTime()) / (1000 * 60 * 60);
+
+    return hoursSinceLastMessage < 24;
+  }
+
+  /**
+   * Check if contact has ever received a message from us
+   */
+  private async hasOutboundMessageHistory(
+    companyId: string,
+    contactId: string,
+  ): Promise<boolean> {
+    const outboundMessage = await this.prisma.message.findFirst({
+      where: {
+        companyId,
+        contactId,
+        direction: 'OUTBOUND',
+        status: {
+          in: ['SENT', 'DELIVERED', 'READ'],
+        },
+      },
+    });
+
+    return !!outboundMessage;
+  }
+
   async sendTextMessage(
     companyId: string,
     phoneNumber: string,
@@ -51,23 +119,202 @@ export class WhatsAppService {
       throw new BadRequestException('Phone number not configured');
     }
 
+    // Normalize phone number to international format
+    const normalizedPhone = this.normalizePhoneNumber(phoneNumber);
+    
+    // Validate phone number format (must start with + and have at least 10 digits)
+    if (!/^\+\d{10,}$/.test(normalizedPhone)) {
+      throw new BadRequestException(
+        'Invalid phone number format. Please use international format (e.g., +1234567890)',
+      );
+    }
+
+    // Find or create contact
+    let contact = await this.prisma.contact.findUnique({
+      where: {
+        companyId_phone: {
+          companyId,
+          phone: normalizedPhone,
+        },
+      },
+    });
+
+    if (!contact) {
+      contact = await this.prisma.contact.create({
+        data: {
+          companyId,
+          phone: normalizedPhone,
+        },
+      });
+    }
+
+    // Find or create conversation
+    let conversation = await this.prisma.conversation.findUnique({
+      where: {
+        companyId_contactId: {
+          companyId,
+          contactId: contact.id,
+        },
+      },
+    });
+
+    if (!conversation) {
+      conversation = await this.prisma.conversation.create({
+        data: {
+          companyId,
+          contactId: contact.id,
+          status: 'OPEN',
+        },
+      });
+    }
+
+    // Check if we can send free-form message (24-hour window rule)
+    const hasActiveWindow = await this.hasActiveConversationWindow(
+      companyId,
+      contact.id,
+    );
+    const hasMessageHistory = await this.hasOutboundMessageHistory(
+      companyId,
+      contact.id,
+    );
+
+    // If no active window and no previous outbound messages, require template
+    if (!hasActiveWindow && !hasMessageHistory) {
+      throw new BadRequestException(
+        'Cannot send free-form message. You must send a template message first to start a conversation. ' +
+          'After the recipient responds, you can send free-form messages within 24 hours.',
+      );
+    }
+
     const apiClient = this.getApiClient(company.whatsappAccessToken);
 
     try {
       const response = await apiClient.post(`/${phoneNumberId}/messages`, {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: phoneNumber,
+        to: normalizedPhone,
         type: 'text',
         text: {
           body: message,
         },
       });
 
-      return response.data;
+      // Verify response structure
+      if (!response.data || !response.data.messages || !response.data.messages[0]) {
+        throw new BadRequestException(
+          'Invalid response from WhatsApp API. Message may not have been sent.',
+        );
+      }
+
+      const whatsappMessageId = response.data.messages[0].id;
+      const responseStatus = response.data.messages[0].message_status;
+
+      if (!whatsappMessageId) {
+        throw new BadRequestException(
+          'Message ID not received from WhatsApp. Message may not have been sent.',
+        );
+      }
+
+      // Update conversation last message time
+      await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { lastMessageAt: new Date() },
+      });
+
+      // Save message to database for status tracking
+      const savedMessage = await this.prisma.message.create({
+        data: {
+          companyId,
+          contactId: contact.id,
+          conversationId: conversation.id,
+          whatsappMessageId,
+          type: 'TEXT',
+          direction: 'OUTBOUND',
+          content: message,
+          status: 'SENT', // Will be updated via webhook
+          sentAt: new Date(),
+        },
+      });
+
+      console.log(
+        `✅ Message sent successfully: ${whatsappMessageId} to ${normalizedPhone}`,
+      );
+
+      return {
+        success: true,
+        messageId: savedMessage.id,
+        whatsappMessageId,
+        phoneNumber: normalizedPhone,
+        status: 'SENT',
+        note: 'Message sent. Delivery status will be updated via webhook.',
+      };
     } catch (error: any) {
+      // Save failed message to database
+      await this.prisma.message.create({
+        data: {
+          companyId,
+          contactId: contact.id,
+          conversationId: conversation.id,
+          type: 'TEXT',
+          direction: 'OUTBOUND',
+          content: message,
+          status: 'FAILED',
+          error: error.response?.data?.error?.message || 'Failed to send message',
+          sentAt: new Date(),
+        },
+      });
+
+      const errorMessage = error.response?.data?.error?.message || 'Failed to send message';
+      const errorCode = error.response?.data?.error?.code;
+      const errorSubcode = error.response?.data?.error?.error_subcode;
+
+      console.error('❌ Message send failed:', {
+        errorCode,
+        errorSubcode,
+        errorMessage,
+        phoneNumber: normalizedPhone,
+      });
+
+      // Provide more specific error messages based on WhatsApp error codes
+      if (errorCode === 131047) {
+        throw new BadRequestException(
+          'Phone number is not registered on WhatsApp. Please ensure the recipient has WhatsApp installed.',
+        );
+      } else if (errorCode === 131026) {
+        throw new BadRequestException(
+          'Message failed to send. The recipient may have blocked your number or the number is invalid.',
+        );
+      } else if (errorCode === 131051) {
+        // 24-hour window expired
+        throw new BadRequestException(
+          'Cannot send free-form message. The 24-hour conversation window has expired. ' +
+            'Please send a template message first to start a new conversation.',
+        );
+      } else if (errorCode === 131031) {
+        // Rate limit
+        throw new BadRequestException(
+          'Rate limit exceeded. Please wait before sending more messages.',
+        );
+      } else if (errorCode === 131048) {
+        // Invalid phone number
+        throw new BadRequestException(
+          'Invalid phone number format. Please use international format (e.g., +1234567890).',
+        );
+      } else if (error.response?.status === 429) {
+        throw new BadRequestException(
+          'Rate limit exceeded. Please wait before sending more messages.',
+        );
+      } else if (errorCode === 131000) {
+        // Generic error - check subcode
+        if (errorSubcode === 131031) {
+          throw new BadRequestException(
+            'Cannot send message. You must send a template message first to start a conversation.',
+          );
+        }
+      }
+
       throw new BadRequestException(
-        error.response?.data?.error?.message || 'Failed to send message',
+        errorMessage || 'Failed to send message. Please check the phone number and try again.',
       );
     }
   }
@@ -96,13 +343,62 @@ export class WhatsAppService {
       throw new BadRequestException('Phone number not configured');
     }
 
+    // Normalize phone number
+    const normalizedPhone = this.normalizePhoneNumber(phoneNumber);
+    
+    // Validate phone number format
+    if (!/^\+\d{10,}$/.test(normalizedPhone)) {
+      throw new BadRequestException(
+        'Invalid phone number format. Please use international format (e.g., +1234567890)',
+      );
+    }
+
+    // Find or create contact
+    let contact = await this.prisma.contact.findUnique({
+      where: {
+        companyId_phone: {
+          companyId,
+          phone: normalizedPhone,
+        },
+      },
+    });
+
+    if (!contact) {
+      contact = await this.prisma.contact.create({
+        data: {
+          companyId,
+          phone: normalizedPhone,
+        },
+      });
+    }
+
+    // Find or create conversation
+    let conversation = await this.prisma.conversation.findUnique({
+      where: {
+        companyId_contactId: {
+          companyId,
+          contactId: contact.id,
+        },
+      },
+    });
+
+    if (!conversation) {
+      conversation = await this.prisma.conversation.create({
+        data: {
+          companyId,
+          contactId: contact.id,
+          status: 'OPEN',
+        },
+      });
+    }
+
     const apiClient = this.getApiClient(company.whatsappAccessToken);
 
     try {
       const payload: any = {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: phoneNumber,
+        to: normalizedPhone,
         type: 'template',
         template: {
           name: templateName,
@@ -121,12 +417,104 @@ export class WhatsAppService {
         payload,
       );
 
-      return response.data;
-    } catch (error: any) {
-      throw new BadRequestException(
-        error.response?.data?.error?.message ||
-          'Failed to send template message',
+      // Verify response structure
+      if (!response.data || !response.data.messages || !response.data.messages[0]) {
+        throw new BadRequestException(
+          'Invalid response from WhatsApp API. Template message may not have been sent.',
+        );
+      }
+
+      const whatsappMessageId = response.data.messages[0].id;
+
+      if (!whatsappMessageId) {
+        throw new BadRequestException(
+          'Message ID not received from WhatsApp. Template message may not have been sent.',
+        );
+      }
+
+      // Update conversation last message time
+      await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { lastMessageAt: new Date() },
+      });
+
+      // Save template message to database
+      const savedMessage = await this.prisma.message.create({
+        data: {
+          companyId,
+          contactId: contact.id,
+          conversationId: conversation.id,
+          whatsappMessageId,
+          type: 'TEMPLATE',
+          direction: 'OUTBOUND',
+          content: `Template: ${templateName}`,
+          status: 'SENT', // Will be updated via webhook
+          sentAt: new Date(),
+        },
+      });
+
+      console.log(
+        `✅ Template message sent successfully: ${whatsappMessageId} to ${normalizedPhone}`,
       );
+
+      return {
+        success: true,
+        messageId: savedMessage.id,
+        whatsappMessageId,
+        phoneNumber: normalizedPhone,
+        templateName,
+        status: 'SENT',
+        note: 'Template message sent. Delivery status will be updated via webhook.',
+      };
+    } catch (error: any) {
+      // Save failed message to database
+      await this.prisma.message.create({
+        data: {
+          companyId,
+          contactId: contact.id,
+          conversationId: conversation.id,
+          type: 'TEMPLATE',
+          direction: 'OUTBOUND',
+          content: `Template: ${templateName}`,
+          status: 'FAILED',
+          error: error.response?.data?.error?.message || 'Failed to send template message',
+          sentAt: new Date(),
+        },
+      });
+
+      const errorMessage = error.response?.data?.error?.message || 'Failed to send template message';
+      const errorCode = error.response?.data?.error?.code;
+
+      console.error('❌ Template message send failed:', {
+        errorCode,
+        errorMessage,
+        phoneNumber: normalizedPhone,
+        templateName,
+        languageCode,
+      });
+
+      // Provide specific error messages for template errors
+      if (errorCode === 132001) {
+        throw new BadRequestException(
+          `Template "${templateName}" does not exist in language "${languageCode}". ` +
+            `Please check the template's available languages in Meta Business Manager. ` +
+            `The template may be available in a different language code (e.g., en_US instead of en).`,
+        );
+      } else if (errorCode === 132000) {
+        throw new BadRequestException(
+          `Template "${templateName}" not found or not approved. Please verify the template exists and is approved in Meta Business Manager.`,
+        );
+      } else if (errorCode === 131047) {
+        throw new BadRequestException(
+          'Phone number is not registered on WhatsApp. Please ensure the recipient has WhatsApp installed.',
+        );
+      } else if (errorCode === 131026) {
+        throw new BadRequestException(
+          'Message failed to send. The recipient may have blocked your number or the number is invalid.',
+        );
+      }
+
+      throw new BadRequestException(errorMessage);
     }
   }
 
@@ -362,6 +750,15 @@ export class WhatsAppService {
         console.warn('WABA validation warning:', wabaError);
       }
 
+      // Additional validation: Try to fetch templates to verify token has proper permissions
+      try {
+        await apiClient.get(`/${wabaId}/message_templates?limit=1`);
+      } catch (templateError: any) {
+        // If we can't fetch templates, the token might not have proper permissions
+        // But we'll still allow the connection - just log a warning
+        console.warn('Template fetch validation warning:', templateError.response?.data?.error?.message || 'Cannot verify template access');
+      }
+
       // Store credentials in company
       await this.prisma.company.update({
         where: { id: companyId },
@@ -445,6 +842,47 @@ export class WhatsAppService {
     }
   }
 
+  async getTemplates(companyId: string) {
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+    });
+
+    if (
+      !company ||
+      !company.whatsappConnected ||
+      !company.whatsappAccessToken ||
+      !company.whatsappBusinessId
+    ) {
+      throw new BadRequestException('WhatsApp not connected for this company');
+    }
+
+    const apiClient = this.getApiClient(company.whatsappAccessToken);
+
+    try {
+      // Fetch templates from Meta's API
+      const response = await apiClient.get(
+        `/${company.whatsappBusinessId}/message_templates`,
+      );
+
+      return {
+        success: true,
+        templates: response.data.data || [],
+        paging: response.data.paging || null,
+      };
+    } catch (error: any) {
+      if (error.response?.status === 401) {
+        throw new BadRequestException('Invalid access token');
+      }
+      if (error.response?.status === 404) {
+        throw new BadRequestException('WhatsApp Business Account not found');
+      }
+      throw new BadRequestException(
+        error.response?.data?.error?.message ||
+          'Failed to fetch templates from WhatsApp',
+      );
+    }
+  }
+
   async verifyWebhookSignature(
     payload: any,
     signature: string,
@@ -469,13 +907,15 @@ export class WhatsAppService {
     // Process incoming webhook from Meta
     // This will handle incoming messages, status updates, etc.
 
+    console.log('📥 Webhook received:', JSON.stringify(webhookData, null, 2));
+
     if (webhookData.entry) {
       for (const entry of webhookData.entry) {
         if (entry.changes) {
           for (const change of entry.changes) {
             const value = change.value;
 
-            // Find company by WABA ID
+            // Find company by Phone Number ID
             if (value?.metadata?.phone_number_id) {
               const company = await this.prisma.company.findFirst({
                 where: {
@@ -485,25 +925,33 @@ export class WhatsAppService {
 
               if (!company) {
                 console.warn(
-                  'Company not found for phone number:',
+                  '⚠️ Company not found for phone number:',
                   value.metadata.phone_number_id,
                 );
                 continue;
               }
 
+              console.log(`✅ Processing webhook for company: ${company.id}`);
+
               if (value.messages) {
+                console.log(`📨 Processing ${value.messages.length} incoming message(s)`);
                 // Handle incoming messages
                 await this.processIncomingMessages(company.id, value.messages);
               }
 
               if (value.statuses) {
+                console.log(`📊 Processing ${value.statuses.length} status update(s)`);
                 // Handle message status updates
                 await this.processStatusUpdates(company.id, value.statuses);
               }
+            } else {
+              console.warn('⚠️ Webhook missing phone_number_id in metadata');
             }
           }
         }
       }
+    } else {
+      console.warn('⚠️ Webhook missing entry data');
     }
   }
 
@@ -608,8 +1056,10 @@ export class WhatsAppService {
       const messageId = status.id;
       const messageStatus = status.status;
 
+      console.log(`📊 Updating message status: ${messageId} -> ${messageStatus}`);
+
       // Update message status
-      await this.prisma.message.updateMany({
+      const updateResult = await this.prisma.message.updateMany({
         where: {
           companyId,
           whatsappMessageId: messageId,
@@ -619,10 +1069,20 @@ export class WhatsAppService {
           ...(messageStatus === 'delivered' && { deliveredAt: new Date() }),
           ...(messageStatus === 'read' && { readAt: new Date() }),
           ...(messageStatus === 'failed' && {
-            error: status.errors?.[0]?.message,
+            error: status.errors?.[0]?.message || 'Message delivery failed',
           }),
         },
       });
+
+      if (updateResult.count === 0) {
+        console.warn(
+          `⚠️ No message found with WhatsApp ID: ${messageId} for company: ${companyId}`,
+        );
+      } else {
+        console.log(
+          `✅ Updated ${updateResult.count} message(s) with status: ${messageStatus}`,
+        );
+      }
     }
   }
 

@@ -24,28 +24,51 @@ export class WhatsAppController {
     private configService: ConfigService,
   ) {}
 
+  @Get('webhook')
+  @ApiExcludeEndpoint()
+  async verifyWebhook(
+    @Query('hub.verify_token') verifyToken: string,
+    @Query('hub.challenge') challenge: string,
+    @Query('hub.mode') mode: string,
+  ) {
+    // Meta sends GET request for webhook verification
+    if (mode === 'subscribe') {
+      const expectedToken = this.configService.get<string>('whatsapp.webhookVerifyToken');
+      console.log('🔍 Webhook verification request:', {
+        mode,
+        verifyToken: verifyToken ? 'provided' : 'missing',
+        expectedToken: expectedToken ? 'configured' : 'missing',
+        challenge: challenge ? 'provided' : 'missing',
+      });
+
+      if (!expectedToken) {
+        console.error('❌ WHATSAPP_WEBHOOK_VERIFY_TOKEN not configured');
+        throw new BadRequestException('Webhook verify token not configured');
+      }
+
+      if (verifyToken === expectedToken) {
+        console.log('✅ Webhook verification successful');
+        return challenge;
+      }
+
+      console.error('❌ Webhook verification failed: token mismatch');
+      throw new BadRequestException('Invalid verify token');
+    }
+
+    throw new BadRequestException('Invalid verification mode');
+  }
+
   @Post('webhook')
   @ApiExcludeEndpoint()
   async handleWebhook(
     @Body() body: any,
     @Headers('x-hub-signature-256') signature: string,
-    @Query('hub.verify_token') verifyToken: string,
-    @Query('hub.challenge') challenge: string,
-    @Query('hub.mode') mode: string,
   ) {
-    // Webhook verification
-    if (mode === 'subscribe') {
-      const expectedToken = this.configService.get<string>('whatsapp.webhookVerifyToken');
-      if (verifyToken === expectedToken) {
-        return challenge;
-      }
-      throw new BadRequestException('Invalid verify token');
-    }
-
-    // Verify signature
+    // Verify signature for POST requests (actual webhook events)
     if (signature) {
       const isValid = await this.whatsappService.verifyWebhookSignature(body, signature);
       if (!isValid) {
+        console.error('❌ Invalid webhook signature');
         throw new BadRequestException('Invalid webhook signature');
       }
     }
@@ -142,6 +165,17 @@ export class WhatsAppController {
       mediaType,
       caption,
     );
+  }
+
+  @Get('templates')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({ summary: 'Fetch message templates from WhatsApp Business Account' })
+  async getTemplates(
+    @CurrentUser() user: any,
+    @Query('companyId') companyId: string,
+  ) {
+    return this.whatsappService.getTemplates(companyId);
   }
 }
 
