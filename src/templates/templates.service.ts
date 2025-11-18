@@ -218,7 +218,9 @@ export class TemplatesService {
       });
 
       if (nameConflict && nameConflict.id !== id) {
-        throw new BadRequestException('Another template already uses this name');
+        throw new BadRequestException(
+          'Another template already uses this name',
+        );
       }
       updateData.name = sanitized;
     }
@@ -301,7 +303,10 @@ export class TemplatesService {
       throw new NotFoundException('Template not found');
     }
 
-    if (template.whatsappTemplateId) {
+    if (
+      template.whatsappTemplateId &&
+      template.status !== TemplateStatus.REJECTED
+    ) {
       throw new BadRequestException('Template already submitted to Meta');
     }
 
@@ -316,6 +321,27 @@ export class TemplatesService {
       !company.whatsappBusinessId
     ) {
       throw new BadRequestException('WhatsApp not connected for this company');
+    }
+
+    if (
+      template.status === TemplateStatus.REJECTED &&
+      template.whatsappTemplateId
+    ) {
+      try {
+        await this.getApiClient(company.whatsappAccessToken).delete(
+          `/${template.whatsappTemplateId}`,
+        );
+      } catch (err) {
+        // log but continue
+      }
+      await this.prisma.template.update({
+        where: { id },
+        data: {
+          whatsappTemplateId: null,
+          status: TemplateStatus.DRAFT,
+        },
+      });
+      template.whatsappTemplateId = null;
     }
 
     const normalizedComponents = this.normalizeAndValidateComponents(
@@ -429,7 +455,8 @@ export class TemplatesService {
           status,
           components,
           whatsappTemplateId: metaId,
-          rejectionReason: status === TemplateStatus.REJECTED ? rejectionReason : null,
+          rejectionReason:
+            status === TemplateStatus.REJECTED ? rejectionReason : null,
         };
 
         if (existing) {
@@ -485,7 +512,9 @@ export class TemplatesService {
     rawComponents: any,
   ): TemplateComponentDto[] {
     if (!Array.isArray(rawComponents) || rawComponents.length === 0) {
-      throw new BadRequestException('At least one template component is required');
+      throw new BadRequestException(
+        'At least one template component is required',
+      );
     }
 
     const components: TemplateComponentDto[] = rawComponents.map(
@@ -497,18 +526,13 @@ export class TemplatesService {
           : component?.type?.toUpperCase() === 'HEADER'
             ? 'TEXT'
             : undefined,
-        text:
-          typeof component?.text === 'string'
-            ? component.text
-            : undefined,
+        text: typeof component?.text === 'string' ? component.text : undefined,
         buttons: component?.buttons,
         example: component?.example,
       }),
     );
 
-    const body = components.find(
-      (component) => component.type === 'BODY',
-    );
+    const body = components.find((component) => component.type === 'BODY');
     if (!body || !body.text?.trim()) {
       throw new BadRequestException(
         'Template body is required and cannot be empty',
@@ -517,9 +541,7 @@ export class TemplatesService {
 
     const bodyText = body.text.trim();
     if (bodyText.length > 1024) {
-      throw new BadRequestException(
-        'Body text cannot exceed 1024 characters',
-      );
+      throw new BadRequestException('Body text cannot exceed 1024 characters');
     }
     const bodyPlaceholderIndexes = this.getPlaceholderIndexes(bodyText);
     this.validatePlaceholderSequence(bodyText);
@@ -548,9 +570,7 @@ export class TemplatesService {
       delete (body.example as any).body_text;
     }
 
-    const header = components.find(
-      (component) => component.type === 'HEADER',
-    );
+    const header = components.find((component) => component.type === 'HEADER');
     if (header) {
       const headerFormat = header.format || 'TEXT';
       if (headerFormat === 'TEXT') {
@@ -571,9 +591,7 @@ export class TemplatesService {
       }
 
       if (header.text) {
-        const headerPlaceholders = this.getPlaceholderIndexes(
-          header.text,
-        );
+        const headerPlaceholders = this.getPlaceholderIndexes(header.text);
         if (headerPlaceholders.length > 0) {
           const headerExample =
             (header.example as any)?.header_text ||
@@ -598,13 +616,9 @@ export class TemplatesService {
       }
     }
 
-    const footer = components.find(
-      (component) => component.type === 'FOOTER',
-    );
+    const footer = components.find((component) => component.type === 'FOOTER');
     if (footer?.text && footer.text.length > 60) {
-      throw new BadRequestException(
-        'Footer text cannot exceed 60 characters',
-      );
+      throw new BadRequestException('Footer text cannot exceed 60 characters');
     }
 
     return components;
