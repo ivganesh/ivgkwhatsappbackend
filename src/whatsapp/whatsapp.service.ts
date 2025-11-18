@@ -323,6 +323,128 @@ export class WhatsAppService {
     }
   }
 
+  async configureManually(
+    companyId: string,
+    wabaId: string,
+    phoneNumberId: string,
+    accessToken: string,
+    phoneNumber?: string,
+  ) {
+    // Validate company exists
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+    });
+
+    if (!company) {
+      throw new BadRequestException('Company not found');
+    }
+
+    // Validate credentials by fetching phone number details
+    const apiClient = this.getApiClient(accessToken);
+
+    try {
+      // Test the connection by fetching phone number details
+      const phoneResponse = await apiClient.get(`/${phoneNumberId}`);
+      const phoneData = phoneResponse.data;
+
+      // Verify WABA ID matches
+      if (phoneData.verified_name?.id && phoneData.verified_name.id !== wabaId) {
+        throw new BadRequestException(
+          'Phone Number ID does not belong to the provided WABA ID',
+        );
+      }
+
+      // Fetch WABA details to verify (optional - just to validate the WABA exists)
+      try {
+        await apiClient.get(`/${wabaId}`);
+      } catch (wabaError) {
+        // If WABA doesn't exist, this will throw, but we continue with phone number validation
+        console.warn('WABA validation warning:', wabaError);
+      }
+
+      // Store credentials in company
+      await this.prisma.company.update({
+        where: { id: companyId },
+        data: {
+          whatsappBusinessId: wabaId,
+          whatsappPhoneId: phoneNumberId,
+          whatsappAccessToken: accessToken,
+          whatsappConnected: true,
+        },
+      });
+
+      // Store phone number details
+      const displayPhoneNumber =
+        phoneNumber ||
+        phoneData.display_phone_number ||
+        phoneData.verified_name?.display_phone_number ||
+        '';
+
+      await this.prisma.phoneNumber.upsert({
+        where: {
+          companyId_phoneNumberId: {
+            companyId,
+            phoneNumberId,
+          },
+        },
+        create: {
+          companyId,
+          phoneNumberId,
+          phoneNumber: displayPhoneNumber,
+          displayName: phoneData.verified_name?.display_name || '',
+          qualityRating: phoneData.quality_rating || null,
+          messagingTier: phoneData.messaging_product_tier || null,
+          isDefault: true,
+          isActive: true,
+        },
+        update: {
+          phoneNumber: displayPhoneNumber,
+          displayName: phoneData.verified_name?.display_name || '',
+          qualityRating: phoneData.quality_rating || null,
+          messagingTier: phoneData.messaging_product_tier || null,
+          isDefault: true,
+        },
+      });
+
+      // Subscribe to webhooks
+      try {
+        await apiClient.post(
+          `${this.apiUrl}/${wabaId}/subscribed_apps`,
+          {},
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          },
+        );
+      } catch (error) {
+        // Webhook subscription might fail, but we can continue
+        console.warn('Failed to subscribe to webhooks:', error);
+      }
+
+      return {
+        success: true,
+        wabaId,
+        phoneNumberId,
+        phoneNumber: displayPhoneNumber,
+        displayName: phoneData.verified_name?.display_name || '',
+      };
+    } catch (error: any) {
+      if (error.response?.status === 401) {
+        throw new BadRequestException('Invalid access token');
+      }
+      if (error.response?.status === 404) {
+        throw new BadRequestException(
+          'Phone Number ID or WABA ID not found. Please verify your credentials.',
+        );
+      }
+      throw new BadRequestException(
+        error.response?.data?.error?.message ||
+          'Failed to validate WhatsApp credentials',
+      );
+    }
+  }
+
   async verifyWebhookSignature(
     payload: any,
     signature: string,

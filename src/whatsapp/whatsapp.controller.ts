@@ -68,6 +68,27 @@ export class WhatsAppController {
     return this.whatsappService.connectWhatsApp(companyId, code);
   }
 
+  @Post('configure-manual')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({ summary: 'Manually configure WhatsApp credentials' })
+  async configureManually(
+    @CurrentUser() user: any,
+    @Body('companyId') companyId: string,
+    @Body('wabaId') wabaId: string,
+    @Body('phoneNumberId') phoneNumberId: string,
+    @Body('accessToken') accessToken: string,
+    @Body('phoneNumber') phoneNumber?: string,
+  ) {
+    return this.whatsappService.configureManually(
+      companyId,
+      wabaId,
+      phoneNumberId,
+      accessToken,
+      phoneNumber,
+    );
+  }
+
   @Post('send/text')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('JWT-auth')
