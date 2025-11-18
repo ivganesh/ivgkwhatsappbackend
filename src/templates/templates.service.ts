@@ -5,7 +5,10 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
-import { CreateTemplateDto } from './dto/create-template.dto';
+import {
+  CreateTemplateDto,
+  TemplateComponentDto,
+} from './dto/create-template.dto';
 import { TemplateStatus, Role, TemplateCategory } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
@@ -64,6 +67,14 @@ export class TemplatesService {
   ) {
     await this.validateAccess(companyId, userId);
 
+    const sanitizedName = this.sanitizeTemplateName(createTemplateDto.name);
+    if (!sanitizedName) {
+      throw new BadRequestException(
+        'Template name must contain only lowercase letters, numbers, or underscores',
+      );
+    }
+    createTemplateDto.name = sanitizedName;
+
     // Check if template name already exists for this company
     const existing = await this.prisma.template.findUnique({
       where: {
@@ -78,15 +89,20 @@ export class TemplatesService {
       throw new BadRequestException('Template with this name already exists');
     }
 
+    const normalizedComponents = this.normalizeAndValidateComponents(
+      createTemplateDto.components,
+    );
+
     const template = await this.prisma.template.create({
       data: {
         companyId,
         name: createTemplateDto.name,
         category: createTemplateDto.category,
-        language: createTemplateDto.language,
-        components: createTemplateDto.components as any,
+        language: this.normalizeLanguageCode(createTemplateDto.language),
+        components: normalizedComponents as any,
         variables: createTemplateDto.variables || {},
         status: TemplateStatus.DRAFT,
+        rejectionReason: null,
       },
     });
 
@@ -184,6 +200,39 @@ export class TemplatesService {
       );
     }
 
+    if (updateData.name) {
+      const sanitized = this.sanitizeTemplateName(updateData.name);
+      if (!sanitized) {
+        throw new BadRequestException(
+          'Template name must contain only lowercase letters, numbers, or underscores',
+        );
+      }
+
+      const nameConflict = await this.prisma.template.findUnique({
+        where: {
+          companyId_name: {
+            companyId,
+            name: sanitized,
+          },
+        },
+      });
+
+      if (nameConflict && nameConflict.id !== id) {
+        throw new BadRequestException('Another template already uses this name');
+      }
+      updateData.name = sanitized;
+    }
+
+    if (updateData.language) {
+      updateData.language = this.normalizeLanguageCode(updateData.language);
+    }
+
+    if (updateData.components) {
+      updateData.components = this.normalizeAndValidateComponents(
+        updateData.components,
+      );
+    }
+
     return this.prisma.template.update({
       where: { id },
       data: {
@@ -269,12 +318,10 @@ export class TemplatesService {
       throw new BadRequestException('WhatsApp not connected for this company');
     }
 
-    const components = this.buildMetaComponents(template.components as any);
-    const hasBody = components.some((component) => component.type === 'BODY');
-
-    if (!hasBody) {
-      throw new BadRequestException('Template must include a BODY component');
-    }
+    const normalizedComponents = this.normalizeAndValidateComponents(
+        template.components as any,
+      );
+    const components = this.buildMetaComponents(normalizedComponents);
 
     try {
       const apiClient = this.getApiClient(company.whatsappAccessToken);
@@ -296,6 +343,7 @@ export class TemplatesService {
         data: {
           status: TemplateStatus.PENDING,
           whatsappTemplateId: metaTemplateId,
+          rejectionReason: null,
         },
       });
 
@@ -370,14 +418,18 @@ export class TemplatesService {
           });
         }
 
+        const rejectionReason = this.extractRejectionReason(remoteTemplate);
+
         const payload = {
           name: remoteTemplate.name,
-          language: remoteTemplate.language || 'en_US',
+          language: this.normalizeLanguageCode(
+            remoteTemplate.language || 'en_US',
+          ),
           category,
           status,
           components,
           whatsappTemplateId: metaId,
-          rejectionReason: remoteTemplate.reject_reason || null,
+          rejectionReason: status === TemplateStatus.REJECTED ? rejectionReason : null,
         };
 
         if (existing) {
@@ -414,7 +466,7 @@ export class TemplatesService {
   }
 
   private sanitizeTemplateName(name: string) {
-    return name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    return name?.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   }
 
   private normalizeLanguageCode(code: string) {
@@ -429,11 +481,116 @@ export class TemplatesService {
     return trimmed.toLowerCase();
   }
 
-  private buildMetaComponents(components: any[]): any[] {
-    if (!Array.isArray(components)) {
-      return [];
+  private normalizeAndValidateComponents(
+    rawComponents: any,
+  ): TemplateComponentDto[] {
+    if (!Array.isArray(rawComponents) || rawComponents.length === 0) {
+      throw new BadRequestException('At least one template component is required');
     }
 
+    const components: TemplateComponentDto[] = rawComponents.map(
+      (component: any) => ({
+        ...component,
+        type: (component?.type || '').toString().toUpperCase(),
+        format: component?.format
+          ? component.format.toString().toUpperCase()
+          : component?.type?.toUpperCase() === 'HEADER'
+            ? 'TEXT'
+            : undefined,
+        text:
+          typeof component?.text === 'string'
+            ? component.text
+            : undefined,
+        buttons: component?.buttons,
+        example: component?.example,
+      }),
+    );
+
+    const body = components.find(
+      (component) => component.type === 'BODY',
+    );
+    if (!body || !body.text?.trim()) {
+      throw new BadRequestException(
+        'Template body is required and cannot be empty',
+      );
+    }
+
+    const bodyText = body.text.trim();
+    if (bodyText.length > 1024) {
+      throw new BadRequestException(
+        'Body text cannot exceed 1024 characters',
+      );
+    }
+    this.validatePlaceholderSequence(bodyText);
+
+    const header = components.find(
+      (component) => component.type === 'HEADER',
+    );
+    if (header) {
+      const headerFormat = header.format || 'TEXT';
+      if (headerFormat === 'TEXT') {
+        if (!header.text?.trim()) {
+          throw new BadRequestException(
+            'Header text is required when header format is TEXT',
+          );
+        }
+        if (header.text.trim().length > 60) {
+          throw new BadRequestException(
+            'Header text cannot exceed 60 characters',
+          );
+        }
+      } else if (header.text) {
+        throw new BadRequestException(
+          `Header text is not allowed when using ${headerFormat} format`,
+        );
+      }
+    }
+
+    const footer = components.find(
+      (component) => component.type === 'FOOTER',
+    );
+    if (footer?.text && footer.text.length > 60) {
+      throw new BadRequestException(
+        'Footer text cannot exceed 60 characters',
+      );
+    }
+
+    return components;
+  }
+
+  private validatePlaceholderSequence(text: string) {
+    const regex = /{{(\d+)}}/g;
+    const found = new Set<number>();
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(text)) !== null) {
+      const index = parseInt(match[1], 10);
+      if (isNaN(index) || index < 1) {
+        throw new BadRequestException(
+          'Placeholder indexes must be positive numbers (e.g., {{1}})',
+        );
+      }
+      if (index > 10) {
+        throw new BadRequestException(
+          'A maximum of 10 placeholders ({{1}} to {{10}}) are allowed in the body',
+        );
+      }
+      found.add(index);
+    }
+
+    if (found.size > 0) {
+      const max = Math.max(...Array.from(found.values()));
+      for (let i = 1; i <= max; i += 1) {
+        if (!found.has(i)) {
+          throw new BadRequestException(
+            'Placeholders must be sequential without gaps (e.g., {{1}}, {{2}}, ...)',
+          );
+        }
+      }
+    }
+  }
+
+  private buildMetaComponents(components: TemplateComponentDto[]): any[] {
     return components.map((component) => {
       const payload: any = {
         type: component.type,
@@ -457,6 +614,26 @@ export class TemplatesService {
 
       return payload;
     });
+  }
+
+  private extractRejectionReason(remoteTemplate: any): string | null {
+    const direct =
+      remoteTemplate?.rejection_reason ||
+      remoteTemplate?.reject_reason ||
+      remoteTemplate?.reject_reasons;
+    if (typeof direct === 'string' && direct.trim()) {
+      return direct.trim();
+    }
+    if (Array.isArray(remoteTemplate?.status_reasons)) {
+      return remoteTemplate.status_reasons
+        .map((reason: any) => reason?.description || reason)
+        .filter(Boolean)
+        .join(', ');
+    }
+    if (remoteTemplate?.review_status?.rejected_reason) {
+      return remoteTemplate.review_status.rejected_reason;
+    }
+    return null;
   }
 
   private mapMetaStatus(status: string): TemplateStatus {
