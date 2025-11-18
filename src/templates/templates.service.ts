@@ -351,15 +351,23 @@ export class TemplatesService {
 
     try {
       const apiClient = this.getApiClient(company.whatsappAccessToken);
+      const payload = {
+        name: this.sanitizeTemplateName(template.name),
+        category: template.category,
+        allow_category_change: true,
+        language: this.normalizeLanguageCode(template.language),
+        components,
+      };
+
+      // Log the payload for debugging
+      console.log(
+        'Submitting template to Meta:',
+        JSON.stringify(payload, null, 2),
+      );
+
       const response = await apiClient.post(
         `/${company.whatsappBusinessId}/message_templates`,
-        {
-          name: this.sanitizeTemplateName(template.name),
-          category: template.category,
-          allow_category_change: true,
-          language: this.normalizeLanguageCode(template.language),
-          components,
-        },
+        payload,
       );
 
       const metaTemplateId = response.data?.id;
@@ -378,10 +386,26 @@ export class TemplatesService {
         template: updated,
       };
     } catch (error: any) {
+      console.error('Meta API error:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+      });
+
+      const metaError = error.response?.data?.error;
       const metaMessage =
-        error.response?.data?.error?.message ||
+        metaError?.message ||
+        metaError?.error_user_msg ||
+        error.response?.data?.error_description ||
         'Failed to submit template to Meta';
-      throw new BadRequestException(metaMessage);
+
+      // Include more details in the error message
+      const errorDetails = metaError?.error_subcode
+        ? ` (Error code: ${metaError.error_subcode})`
+        : '';
+      const fullMessage = `${metaMessage}${errorDetails}`;
+
+      throw new BadRequestException(fullMessage);
     }
   }
 
@@ -547,14 +571,26 @@ export class TemplatesService {
     this.validatePlaceholderSequence(bodyText);
 
     if (bodyPlaceholderIndexes.length > 0) {
-      const exampleSource =
-        (body.example as any)?.body_text?.[0] ||
-        (Array.isArray((body.example as any)?.body_text)
-          ? (body.example as any)?.body_text
-          : []);
-      const normalizedSamples = Array.isArray(exampleSource)
-        ? exampleSource.map((value: any) => value?.toString().trim())
-        : [];
+      // Extract body example - Meta stores it as nested array: [[values]]
+      let exampleSource: any[] = [];
+      const bodyExample = (body.example as any)?.body_text;
+
+      if (bodyExample) {
+        if (Array.isArray(bodyExample)) {
+          // If it's already nested (array of arrays), take the first array
+          if (Array.isArray(bodyExample[0])) {
+            exampleSource = bodyExample[0];
+          } else {
+            // If it's a flat array, use it directly
+            exampleSource = bodyExample;
+          }
+        }
+      }
+
+      const normalizedSamples = exampleSource
+        .map((value: any) => value?.toString().trim())
+        .filter((sample) => sample);
+
       if (normalizedSamples.length < bodyPlaceholderIndexes.length) {
         throw new BadRequestException(
           'Provide sample values for every body placeholder ({{1}}, {{2}}, ...).',
@@ -565,8 +601,10 @@ export class TemplatesService {
           'Body placeholder samples cannot be empty.',
         );
       }
+      // Meta expects body_text as nested array: [[values]]
       body.example = { body_text: [normalizedSamples] };
     } else if (body.example) {
+      // Remove body_text if no placeholders
       delete (body.example as any).body_text;
     }
 
@@ -668,10 +706,52 @@ export class TemplatesService {
       if (component.text) {
         payload.text = component.text;
       }
+
+      // Only include example if it exists and has valid data
       if (component.example) {
-        payload.example = component.example;
+        const example: any = {};
+        let hasExample = false;
+
+        // Handle body example
+        if ((component.example as any).body_text) {
+          const bodyText = (component.example as any).body_text;
+          // Meta expects body_text to be an array of arrays
+          if (Array.isArray(bodyText) && bodyText.length > 0) {
+            // If it's already nested, use it; otherwise wrap it
+            const normalized = Array.isArray(bodyText[0])
+              ? bodyText
+              : [bodyText];
+            example.body_text = normalized;
+            hasExample = true;
+          }
+        }
+
+        // Handle header example
+        if ((component.example as any).header_text) {
+          const headerText = (component.example as any).header_text;
+          // Meta expects header_text to be an array (not nested)
+          if (Array.isArray(headerText) && headerText.length > 0) {
+            example.header_text = headerText;
+            hasExample = true;
+          }
+        }
+
+        // Handle header_handle (for media headers)
+        if ((component.example as any).header_handle) {
+          example.header_handle = (component.example as any).header_handle;
+          hasExample = true;
+        }
+
+        if (hasExample) {
+          payload.example = example;
+        }
       }
-      if (component.buttons) {
+
+      if (
+        component.buttons &&
+        Array.isArray(component.buttons) &&
+        component.buttons.length > 0
+      ) {
         payload.buttons = component.buttons;
       }
       if (component.variables) {
