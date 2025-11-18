@@ -957,10 +957,18 @@ export class WhatsAppService {
 
   private async processIncomingMessages(companyId: string, messages: any[]) {
     for (const message of messages) {
-      const contactPhone = message.from;
+      const rawPhone = message.from;
       const messageId = message.id;
       const messageType = message.type;
       const timestamp = parseInt(message.timestamp) * 1000;
+
+      if (!rawPhone) {
+        console.warn('⚠️ Incoming message missing sender phone number');
+        continue;
+      }
+
+      // Normalize phone number to ensure consistency with outbound messages
+      const contactPhone = this.normalizePhoneNumber(rawPhone);
 
       // Find or create contact
       let contact = await this.prisma.contact.findUnique({
